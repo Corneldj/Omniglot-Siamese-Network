@@ -84,7 +84,7 @@ def contrastive_loss(label, embedding, margin = 0.4):
    
 #- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
     
-def conv_net (x, y, ds_info, num_classes, batch_size = 128, epochs = 12):
+def conv_net (ds_info, batch_size = 128, epochs = 12):
     '''
     Create a cnn 
     
@@ -96,41 +96,28 @@ def conv_net (x, y, ds_info, num_classes, batch_size = 128, epochs = 12):
     @optional opochs
     
     '''
-        
-    # Get the input shape
-    input_shape = ds_info.features['image'].shape
     
-   ## Create the CNN
-   # Create the input layer
-    input_layer = Input(input_shape)
+      # Get the input shape
+    image_shape = ds_info.features['image'].shape
     
-    # Add convolution
-    model = Conv2D(32, kernel_size=(3, 3), activation='relu', input_shape=input_shape)(input_layer)
-
-    # Add another convolution layer
-    #model = Conv2D(64, (3, 3), activation='relu') ( model )
-    
-    # Add max pooling
-    model = MaxPooling2D(pool_size=(2, 2))(model)
-    
-    # Flatten the model
-    model = Flatten()(model)
-    
-    # Create a dense layer with regulization
-    model = Dense(
+    model = keras.Sequential(
+    [
+        Conv2D(32, 3, activation='relu', input_shape=image_shape),
+        MaxPooling2D(),
+        Conv2D(32, 3, activation='relu'),
+        MaxPooling2D(),
+        Flatten(),
+        Dense(
             128, 
             activation='relu', 
             kernel_regularizer=regularizers.l2(0.01),
             bias_regularizer=regularizers.l1(0.01)
-            )(model)
+            ),
+        Dense(ds_info.features['label'].num_classes, activation='softmax')
+    ])
     
-    output = Dense(num_classes, activation='softmax')(model)
     
-    output_model = keras.models.Model(input_layer, output)
-    
-    output_model.summary()
-    
-    return output_model
+    return model
 
 
 #- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
@@ -208,6 +195,7 @@ def UniqueClassIndexes(arr):
     unique_list = dict()
     output_arr = []
     index = 0
+    
     # We map it to dictionary
     for i in arr:
         if i not in unique_list:
@@ -229,41 +217,34 @@ def UniqueClassIndexes(arr):
 
 ' Load Omniglot dataset ' 
 # load the training data
-(ds_train, ds_test), ds_info = tfds.load(name='Omniglot', split=['train', 'test'], with_info=True)
+ds, ds_info = tfds.load(name='Omniglot', with_info=True, as_supervised=True)
 
+
+(img_train, label_train), (img_test, label_test) = tfds.as_numpy(tfds.load(
+    name = 'kmnist',
+    split=['train', 'test'],
+    batch_size=-1,
+    as_supervised=True,
+))
 #- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
 'Specify Testing Values'
-batch_size = 128
 epochs = 3 # 3 for testin
 
 #- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
 ' Split the dataset into testing and training '
+ds_train, ds_test = ds["train"], ds["test"]
 
+#- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+' Tune for performance '
 
-# Convert labels to numpy arrays for manipulation
-train_labels = np.array([[glyph["alphabet"].numpy() for glyph in ds_train]])
-test_labels = np.array([[glyph["alphabet"].numpy() for glyph in ds_test]])
+AUTOTUNE = tf.data.experimental.AUTOTUNE
 
-# Convert images to numpy arrays for manipulation
-train_images = np.array([glyph["image"].numpy() for glyph in ds_train])
-test_images = np.array([glyph["image"].numpy() for glyph in ds_test])
-
-# Re-shape images for input layer
-train_images = train_images.reshape(train_images.shape[0], train_images.shape[1], train_images.shape[2], 3)
-test_images = test_images.reshape(test_images.shape[0], test_images.shape[1], test_images.shape[2], 3)
-
-# Normalize images to improve performance of model
-train_images = train_images.astype("float32") / 255
-test_images = test_images.astype("float32") / 255
-
-# Change the Labels to categorical
-num_classes = len(np.unique(train_labels))
-train_labels = UniqueClassIndexes(train_labels[0]) #keras.utils.to_categorical(UniqueClassIndexes(train_labels[0]), num_classes = num_classes)
-test_labels =  UniqueClassIndexes(test_labels[0]) #keras.utils.to_categorical(UniqueClassIndexes(test_labels[0]),  num_classes = num_classes)
+ds_train = ds_train.cache().prefetch(buffer_size=AUTOTUNE)
+ds_test = ds_test.cache().prefetch(buffer_size=AUTOTUNE)
 
 #- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
 'Create a CNN to help test'
-model = conv_net (train_images, test_labels, ds_info, num_classes)
+model = conv_net (ds_info)
 
 #- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
 ' Test contrastive loss function '
@@ -275,12 +256,11 @@ cont_loss_model = compile_cnn(model, contrastive_loss, optimizer)
 
 # Fil the results
 cont_loss_model.fit(
-        train_images,
-        train_labels,
-        batch_size=batch_size,
-        epochs=epochs,
-        verbose=1,
-        validation_data=(test_images, test_labels))
+    ds_train,
+    validation_data=ds_test,
+    epochs=epochs,
+    verbose=1
+    )
 
 #- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
 ' Test triplet loss function '
@@ -288,12 +268,11 @@ trip_loss_model = compile_cnn(model, triplet_loss, optimizer)
 
 # Fil the results
 trip_loss_model.fit(
-        train_images, 
-        tf.transpose(train_labels),
-        batch_size=batch_size,
-        epochs=epochs,
-        verbose=1,
-        validation_data=(test_images, test_labels))
+    ds_train,
+    validation_data=ds_test,
+    epochs=epochs,
+    verbose=1
+    )
 
 #- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
 ' Build a siamese network '
